@@ -1,0 +1,94 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/home/qzh/opt/llm_proxy' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require deploy secrets
+        run: |
+          if [ -z "${{ secrets.SSH_HOST }}" ] || [ -z "${{ secrets.SSH_USER }}" ] || [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+            echo "::error::Missing required secrets: SSH_HOST, SSH_USER, SSH_PRIVATE_KEY"
+            exit 1
+          fi
+
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Sync code to server
+        run: |
+          rsync -az --delete \
+            -e "ssh -p $SSH_PORT" \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude 'node_modules/' \
+            --exclude '.env' \
+            --exclude '*.log' \
+            --exclude '.DS_Store' \
+            --exclude 'yes' \
+            --exclude 'yes.pub' \
+            --exclude '*.pem' \
+            --exclude 'id_rsa' \
+            --exclude 'id_ed25519' \
+            ./ "${SSH_USER}@${SSH_HOST}:${DEPLOY_PATH}/"
+
+      - name: Install dependencies and reload PM2
+        run: |
+          ssh -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" \
+            "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'EOF'
+          set -euo pipefail
+          cd "$DEPLOY_PATH"
+          npm ci --omit=dev
+          if [ -f ecosystem.config.cjs ]; then
+            pm2 reload ecosystem.config.cjs --update-env || pm2 start ecosystem.config.cjs
+          else
+            pm2 reload llm-proxy --update-env || pm2 start src/index.js --name llm-proxy
+          fi
+          pm2 save
+          EOF
+
+      - name: Health check
+        run: |
+          ssh -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" \
+            "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'EOF'
+          set -euo pipefail
+          cd "$DEPLOY_PATH"
+          PORT="$(grep -E '^PORT=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'" || true)"
+          PORT="${PORT:-3000}"
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null; then
+              curl -fsS "http://127.0.0.1:${PORT}/health"
+              echo
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Health check failed on port ${PORT}" >&2
+          pm2 status || true
+          exit 1
+          EOF
