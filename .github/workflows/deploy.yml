@@ -61,6 +61,16 @@ jobs:
           ssh -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" \
             "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'EOF'
           set -euo pipefail
+
+          # Non-interactive SSH often skips .bashrc; load Node tooling explicitly.
+          export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+          [ -f "$HOME/.profile" ] && . "$HOME/.profile"
+          export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+
+          command -v npm >/dev/null || { echo "npm not found in PATH=$PATH" >&2; exit 127; }
+          command -v pm2 >/dev/null || { echo "pm2 not found; install with: npm i -g pm2" >&2; exit 127; }
+
           cd "$DEPLOY_PATH"
           npm ci --omit=dev
           if [ -f ecosystem.config.cjs ]; then
@@ -76,6 +86,12 @@ jobs:
           ssh -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" \
             "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'EOF'
           set -euo pipefail
+
+          export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+          [ -f "$HOME/.profile" ] && . "$HOME/.profile"
+          export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+
           cd "$DEPLOY_PATH"
           PORT="$(grep -E '^PORT=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'" || true)"
           PORT="${PORT:-3000}"
